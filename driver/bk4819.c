@@ -699,7 +699,8 @@ void BK4819_SetupSquelch(
 		uint8_t SquelchOpenNoiseThresh,
 		uint8_t SquelchCloseNoiseThresh,
 		uint8_t SquelchCloseGlitchThresh,
-		uint8_t SquelchOpenGlitchThresh)
+		uint8_t SquelchOpenGlitchThresh,
+		bool    amMode)
 {
 	// REG_70
 	//
@@ -740,13 +741,25 @@ void BK4819_SetupSquelch(
 	// <7:0>   8 Glitch threshold for Squelch = open
 	//         0 ~ 255
 	//
-	BK4819_WriteRegister(BK4819_REG_4E,  // 01 101 11 1 00000000
+	// NOTE: upstream wrote (1u << 14) | (5u << 11) | (6u << 9) here. The close-delay
+	// field <10:9> is only two bits wide, so the '6' (0b110) did not fit: its top bit
+	// landed in bit 11, which belongs to the open-delay field. Because the fields are
+	// OR'd together and bit 11 was already set by (5u << 11), the collision was
+	// absorbed and the register came out as 0x6C00 - open delay 5 (as the comment
+	// intended) but close delay 2, not the "*3" the comment claims.
+	//
+	// The fields are written explicitly below. FM keeps 5/2, exactly what upstream
+	// produced, so FM behaviour is unchanged. AM uses a much shorter open delay:
+	// airband transmissions are short and the leading syllable is otherwise lost
+	// while the chip sits in its open delay.
+	const uint8_t squelch_open_delay  = amMode ? 2u : 5u;   // 0 ~ 7
+	const uint8_t squelch_close_delay = 2u;                 // 0 ~ 3
 
-		// original (*)
-	(1u << 14) |                  //  1 ???
-	(5u << 11) |                  // *5  squelch = open  delay .. 0 ~ 7
-	(6u <<  9) |                  // *3  squelch = close delay .. 0 ~ 3
-	SquelchOpenGlitchThresh);     //  0 ~ 255
+	BK4819_WriteRegister(BK4819_REG_4E,
+	(1u << 14) |                                     //  1 ???
+	((squelch_open_delay  & 7u) << 11) |             //  squelch = open  delay .. 0 ~ 7
+	((squelch_close_delay & 3u) <<  9) |             //  squelch = close delay .. 0 ~ 3
+	SquelchOpenGlitchThresh);                        //  0 ~ 255
 
 
 	// REG_4F
@@ -767,11 +780,22 @@ void BK4819_SetupSquelch(
 	//
 	// <7:0>  70 RSSI threshold for Squelch = close   0.5dB/step
 	//
-	BK4819_WriteRegister(BK4819_REG_78, ((uint16_t)SquelchOpenRSSIThresh   << 8) | SquelchCloseRSSIThresh);
+	BK4819_SetSquelchRSSIThresholds(SquelchOpenRSSIThresh, SquelchCloseRSSIThresh);
 
 	BK4819_SetAF(BK4819_AF_MUTE);
 
 	BK4819_RX_TurnOn();
+}
+
+// Rewrite just the RSSI half of the squelch comparator (REG_78).
+//
+// am_fix uses this to shift both thresholds by however much front end gain it has
+// taken away. The comparator sees post-gain RSSI, so without this every gain step
+// would move the squelch reference underneath it and the squelch would chatter in
+// step with the AGC.
+void BK4819_SetSquelchRSSIThresholds(uint8_t open, uint8_t close)
+{
+	BK4819_WriteRegister(BK4819_REG_78, ((uint16_t)open << 8) | close);
 }
 
 void BK4819_SetAF(BK4819_AF_Type_t AF)

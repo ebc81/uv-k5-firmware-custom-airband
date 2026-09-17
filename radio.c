@@ -103,7 +103,12 @@ void RADIO_InitInfo(VFO_Info_t *pInfo, const uint8_t ChannelSave, const uint32_t
 	pInfo->Band                     = FREQUENCY_GetBand(Frequency);
 	pInfo->SCANLIST1_PARTICIPATION  = false;
 	pInfo->SCANLIST2_PARTICIPATION  = false;
+#ifdef ENABLE_AIRBAND_DEFAULTS
+	// the airband comes up on the 8.33kHz channel grid, everything else on 12.5kHz
+	pInfo->STEP_SETTING             = (pInfo->Band == BAND2_108MHz) ? STEP_8_33kHz : STEP_12_5kHz;
+#else
 	pInfo->STEP_SETTING             = STEP_12_5kHz;
+#endif
 	pInfo->StepFrequency            = gStepFrequencyTable[pInfo->STEP_SETTING];
 	pInfo->CHANNEL_SAVE             = ChannelSave;
 	pInfo->FrequencyReverse         = false;
@@ -114,7 +119,15 @@ void RADIO_InitInfo(VFO_Info_t *pInfo, const uint8_t ChannelSave, const uint32_t
 	pInfo->pTX                      = &pInfo->freq_config_TX;
 	pInfo->Compander                = 0;  // off
 
+#ifdef ENABLE_AIRBAND_DEFAULTS
+	// pick AM from the actual frequency rather than from the VFO slot index.
+	// the original test keyed off (FREQ_CHANNEL_FIRST + BAND2_108MHz), which never
+	// fires in practice because SETTINGS_InitEEPROM rewrites every 0xFF channel
+	// attribute to 0x0F, so the RADIO_InitInfo fallback is unreachable.
+	if (pInfo->Band == BAND2_108MHz)
+#else
 	if (ChannelSave == (FREQ_CHANNEL_FIRST + BAND2_108MHz))
+#endif
 		pInfo->Modulation = MODULATION_AM;
 	else
 		pInfo->Modulation = MODULATION_FM;
@@ -349,7 +362,8 @@ void RADIO_ConfigureChannel(const unsigned int VFO, const unsigned int configure
 
 	pVfo->freq_config_RX.Frequency = frequency;
 
-	if (frequency >= frequencyBandTable[BAND2_108MHz].upper && frequency < frequencyBandTable[BAND2_108MHz].upper)
+	// upstream compared '.upper' against itself here, so this was always false
+	if (frequency >= frequencyBandTable[BAND2_108MHz].lower && frequency < frequencyBandTable[BAND2_108MHz].upper)
 		pVfo->TX_OFFSET_FREQUENCY_DIRECTION = TX_OFFSET_FREQUENCY_DIRECTION_OFF;
 	else if (!IS_MR_CHANNEL(channel))
 		pVfo->TX_OFFSET_FREQUENCY = FREQUENCY_RoundToStep(pVfo->TX_OFFSET_FREQUENCY, pVfo->StepFrequency);
@@ -429,8 +443,19 @@ void RADIO_ConfigureSquelchAndOutputPower(VFO_Info_t *pInfo)
 		// make squelch more sensitive
 		// note that 'noise' and 'glitch' values are inverted compared to 'rssi' values
 		rssi_open   = (rssi_open   * 1) / 2;
-		noise_open  = (noise_open  * 2) / 1;
-		glitch_open = (glitch_open * 2) / 1;
+		if (pInfo->Modulation == MODULATION_AM)
+		{	// AM: the stock x2 pushes noise_open past the 127 clamp below, which
+			// disables the noise criterion outright and leaves an RSSI-only squelch.
+			// Airband wants the sensitivity but still benefits from noise/glitch
+			// rejection, so scale more gently and keep both criteria live.
+			noise_open  = (noise_open  * 3) / 2;
+			glitch_open = (glitch_open * 3) / 2;
+		}
+		else
+		{
+			noise_open  = (noise_open  * 2) / 1;
+			glitch_open = (glitch_open * 2) / 1;
+		}
 
 		// ensure the 'close' threshold is lower than the 'open' threshold
 		if (rssi_close == rssi_open && rssi_close >= 2)
@@ -533,6 +558,27 @@ void RADIO_SetupRegisters(bool switchToForeground)
 
 	BK4819_ToggleGpioOut(BK4819_GPIO6_PIN2_GREEN, false);
 
+	// 'weak_no_different' true means the chip does NOT narrow the RF filter on weak
+	// signals. For AM that matters: dynamic narrowing makes a fading airband signal
+	// audibly change bandwidth.
+	bool weak_no_different;
+
+	if (gRxVfo->Modulation == MODULATION_AM)
+	{	// AM gets its own bandwidth selection. The per-channel WIDE/NARROW bit is an
+		// FM notion and is only one bit wide, so BK4819_FILTER_BW_NARROWER (6.25kHz)
+		// is otherwise unreachable from the normal RX path.
+		Bandwidth         = (BK4819_FilterBandwidth_t)gSetting_AM_bandwidth;
+		weak_no_different = true;
+	}
+	else
+	{
+		#ifdef ENABLE_AM_FIX
+			weak_no_different = true;
+		#else
+			weak_no_different = false;
+		#endif
+	}
+
 	switch (Bandwidth)
 	{
 		default:
@@ -540,12 +586,8 @@ void RADIO_SetupRegisters(bool switchToForeground)
 			[[fallthrough]];
 		case BK4819_FILTER_BW_WIDE:
 		case BK4819_FILTER_BW_NARROW:
-			#ifdef ENABLE_AM_FIX
-//				BK4819_SetFilterBandwidth(Bandwidth, gRxVfo->Modulation == MODULATION_AM && gSetting_AM_fix);
-				BK4819_SetFilterBandwidth(Bandwidth, true);
-			#else
-				BK4819_SetFilterBandwidth(Bandwidth, false);
-			#endif
+		case BK4819_FILTER_BW_NARROWER:
+			BK4819_SetFilterBandwidth(Bandwidth, weak_no_different);
 			break;
 	}
 
@@ -583,7 +625,13 @@ void RADIO_SetupRegisters(bool switchToForeground)
 	BK4819_SetupSquelch(
 		gRxVfo->SquelchOpenRSSIThresh,    gRxVfo->SquelchCloseRSSIThresh,
 		gRxVfo->SquelchOpenNoiseThresh,   gRxVfo->SquelchCloseNoiseThresh,
-		gRxVfo->SquelchCloseGlitchThresh, gRxVfo->SquelchOpenGlitchThresh);
+		gRxVfo->SquelchCloseGlitchThresh, gRxVfo->SquelchOpenGlitchThresh,
+		gRxVfo->Modulation == MODULATION_AM);
+
+	#ifdef ENABLE_AM_FIX
+		// hand am_fix the un-offset RSSI thresholds it should shift from
+		AM_fix_set_squelch_base(gRxVfo->SquelchOpenRSSIThresh, gRxVfo->SquelchCloseRSSIThresh);
+	#endif
 
 	BK4819_PickRXFilterPathBasedOnFrequency(Frequency);
 
@@ -753,6 +801,7 @@ void RADIO_SetupRegisters(bool switchToForeground)
 	}
 #endif
 
+#ifdef ENABLE_TX
 void RADIO_SetTxParameters(void)
 {
 	BK4819_FilterBandwidth_t Bandwidth = gCurrentVfo->CHANNEL_BANDWIDTH;
@@ -815,6 +864,7 @@ void RADIO_SetTxParameters(void)
 			break;
 	}
 }
+#endif // ENABLE_TX
 
 void RADIO_SetModulation(ModulationMode_t modulation)
 {
@@ -853,13 +903,23 @@ void RADIO_SetModulation(ModulationMode_t modulation)
 void RADIO_SetupAGC(bool listeningAM, bool disable)
 {
 	static uint8_t lastSettings;
-	uint8_t newSettings = (listeningAM << 1) | (disable << 1);
-	if(lastSettings == newSettings)
+	static bool    haveLastSettings;
+
+	// upstream shifted both operands by 1, so the two flags collided into the same
+	// bit and (AM=1,disable=0) was indistinguishable from (AM=0,disable=1).
+	// 'haveLastSettings' is needed because the all-zero first call would otherwise
+	// match the initial value of 'lastSettings' and skip the initial programming.
+	uint8_t newSettings = (listeningAM << 1) | (disable << 0);
+	if(haveLastSettings && lastSettings == newSettings)
 		return;
-	lastSettings = newSettings;
+	lastSettings     = newSettings;
+	haveLastSettings = true;
 
 
 	if(!listeningAM) { // if not actively listening AM we don't need any AM specific regulation
+#ifdef ENABLE_AM_FIX
+		AM_fix_enable(false);   // hands REG_13 and the squelch thresholds back
+#endif
 		BK4819_SetAGC(!disable);
 		BK4819_InitAGC(false);
 	}
@@ -872,6 +932,9 @@ void RADIO_SetupAGC(bool listeningAM, bool disable)
 		else
 #endif
 		{
+#ifdef ENABLE_AM_FIX
+			AM_fix_enable(false);
+#endif
 			BK4819_SetAGC(!disable);
 			BK4819_InitAGC(true);
 		}
@@ -897,6 +960,7 @@ void RADIO_SetVfoState(VfoState_t State)
 }
 
 
+#ifdef ENABLE_TX
 void RADIO_PrepareTX(void)
 {
 	VfoState_t State = VFO_STATE_NORMAL;  // default to OK to TX
@@ -1040,3 +1104,4 @@ void RADIO_PrepareCssTX(void)
 		RADIO_SendCssTail();
 	RADIO_SetupRegisters(true);
 }
+#endif // ENABLE_TX

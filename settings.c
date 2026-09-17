@@ -23,6 +23,7 @@
 #include "driver/bk1080.h"
 #include "driver/bk4819.h"
 #include "driver/eeprom.h"
+#include "am_fix.h"
 #include "misc.h"
 #include "settings.h"
 #include "ui/menu.h"
@@ -152,6 +153,14 @@ void SETTINGS_InitEEPROM(void)
 	gEeprom.REPEATER_TAIL_TONE_ELIMINATION = (Data[2] < 11) ? Data[2] : 0;
 	gEeprom.TX_VFO                         = (Data[3] <  2) ? Data[3] : 0;
 	gEeprom.BATTERY_TYPE                   = (Data[4] < BATTERY_TYPE_UNKNOWN) ? Data[4] : BATTERY_TYPE_1600_MAH;
+
+	// bytes 5..7 of this block were unused by the stock layout - the airband
+	// settings live there. An erased byte reads 0xFF and falls back to the default.
+	#ifdef ENABLE_AM_FIX
+		gSetting_AM_target                 = (Data[5] <= AM_FIX_TARGET_MAX_INDEX)  ? Data[5] : AM_FIX_TARGET_DEFAULT;
+		gSetting_AM_speed                  = (Data[6] <= AM_FIX_SPEED_MAX_INDEX)   ? Data[6] : AM_FIX_SPEED_DEFAULT;
+	#endif
+	gSetting_AM_bandwidth                  = (Data[7] <= AM_BANDWIDTH_MAX_INDEX)   ? Data[7] : AM_BANDWIDTH_DEFAULT;
 
 	// 0ED0..0ED7
 	EEPROM_ReadBuffer(0x0ED0, Data, 8);
@@ -538,6 +547,12 @@ void SETTINGS_SaveSettings(void)
 	State[2] = gEeprom.REPEATER_TAIL_TONE_ELIMINATION;
 	State[3] = gEeprom.TX_VFO;
 	State[4] = gEeprom.BATTERY_TYPE;
+	// airband settings ride in the three spare bytes of this block
+	#ifdef ENABLE_AM_FIX
+		State[5] = gSetting_AM_target;
+		State[6] = gSetting_AM_speed;
+	#endif
+	State[7] = gSetting_AM_bandwidth;
 	EEPROM_WriteBuffer(0x0EA8, State);
 
 	State[0] = gEeprom.DTMF_SIDE_TONE;

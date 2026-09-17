@@ -61,6 +61,7 @@ const uint16_t    scan_pause_delay_in_4_10ms       =   300 / 10;   // 300ms
 const uint16_t    scan_pause_delay_in_5_10ms       =  1000 / 10;   // 1 sec
 const uint16_t    scan_pause_delay_in_6_10ms       =   100 / 10;   // 100ms
 const uint16_t    scan_pause_delay_in_7_10ms       =  3600 / 10;   // 3.6 seconds
+const uint16_t    scan_pause_delay_in_am_10ms      =   150 / 10;   // 150ms (AM scan dwell)
 
 const uint16_t    battery_save_count_10ms          = 10000 / 10;   // 10 seconds
 
@@ -93,7 +94,11 @@ enum BacklightOnRxTx_t gSetting_backlight_on_tx_rx;
 
 #ifdef ENABLE_AM_FIX
 	bool          gSetting_AM_fix;
+	uint8_t       gSetting_AM_target;
+	uint8_t       gSetting_AM_speed;
 #endif
+
+uint8_t           gSetting_AM_bandwidth;
 
 #ifdef ENABLE_AUDIO_BAR
 	bool          gSetting_mic_bar;

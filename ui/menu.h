@@ -101,8 +101,11 @@ enum
 	MENU_VOL,
 	MENU_BAT_TXT,
 	MENU_AM,
+	MENU_AM_BW,
 #ifdef ENABLE_AM_FIX
 	MENU_AM_FIX,
+	MENU_AM_TARGET,
+	MENU_AM_SPEED,
 #endif
 #ifdef ENABLE_NOAA
 	MENU_NOAA_S,
@@ -158,6 +161,10 @@ extern const char        gSubMenu_RX_TX[4][6];
 extern const char        gSubMenu_BAT_TXT[3][8];
 extern const char 		 gSubMenu_BATTYP[2][9];
 extern const char        gSubMenu_SCRAMBLER[11][7];
+extern const char        gSubMenu_AM_BW[3][7];
+#ifdef ENABLE_AM_FIX
+	extern const char    gSubMenu_AM_SPEED[3][5];
+#endif
 
 typedef struct {char* name; uint8_t id;} t_sidefunction;
 extern const uint8_t 		 gSubMenu_SIDEFUNCTIONS_size;

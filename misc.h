@@ -134,6 +134,9 @@ extern const uint16_t        scan_pause_delay_in_4_10ms;
 extern const uint16_t        scan_pause_delay_in_5_10ms;
 extern const uint16_t        scan_pause_delay_in_6_10ms;
 extern const uint16_t        scan_pause_delay_in_7_10ms;
+// AM needs a longer scan dwell than FM: the AM squelch open delay plus the
+// am_fix settling time do not fit in the 90ms FM dwell
+extern const uint16_t        scan_pause_delay_in_am_10ms;
 
 //extern const uint16_t        gMax_bat_v;
 //extern const uint16_t        gMin_bat_v;
@@ -154,7 +157,19 @@ extern enum BacklightOnRxTx_t gSetting_backlight_on_tx_rx;
 
 #ifdef ENABLE_AM_FIX
 	extern bool              gSetting_AM_fix;
+	// AGC target level, as an offset from AM_FIX_TARGET_DBM_MIN
+	extern uint8_t           gSetting_AM_target;
+	// how fast gain is restored: AM_FIX_SPEED_FAST / _MED / _SLOW
+	extern uint8_t           gSetting_AM_speed;
 #endif
+
+// RX filter bandwidth used in AM, as a BK4819_FilterBandwidth_t.
+// AM does not use the per-channel WIDE/NARROW bit: that is a single bit, so it
+// cannot reach BK4819_FILTER_BW_NARROWER (6.25kHz), which is the useful one on
+// 8.33kHz airband spacing.
+#define AM_BANDWIDTH_MAX_INDEX   2   // BK4819_FILTER_BW_NARROWER
+#define AM_BANDWIDTH_DEFAULT     1   // BK4819_FILTER_BW_NARROW
+extern uint8_t               gSetting_AM_bandwidth;
 
 #ifdef ENABLE_AUDIO_BAR
 	extern bool              gSetting_mic_bar;

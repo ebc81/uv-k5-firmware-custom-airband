@@ -1,6 +1,7 @@
 
 #include "app/app.h"
 #include "app/chFrScanner.h"
+#include "radio.h"
 #include "functions.h"
 #include "misc.h"
 #include "settings.h"
@@ -168,10 +169,14 @@ static void NextFreqChannel(void)
 	RADIO_ConfigureSquelchAndOutputPower(gRxVfo);
 	RADIO_SetupRegisters(true);
 
+	// AM needs longer to settle than FM - see scan_pause_delay_in_am_10ms
+	if (gRxVfo->Modulation == MODULATION_AM)
+		gScanPauseDelayIn_10ms = scan_pause_delay_in_am_10ms;
+	else
 #ifdef ENABLE_FASTER_CHANNEL_SCAN
-	gScanPauseDelayIn_10ms = 9;   // 90ms
+		gScanPauseDelayIn_10ms = 9;   // 90ms
 #else
-	gScanPauseDelayIn_10ms = scan_pause_delay_in_6_10ms;
+		gScanPauseDelayIn_10ms = scan_pause_delay_in_6_10ms;
 #endif
 
 	gUpdateDisplay     = true;
@@ -261,10 +266,13 @@ static void NextMemChannel(void)
 		gUpdateDisplay = true;
 	}
 
+	if (gRxVfo->Modulation == MODULATION_AM)
+		gScanPauseDelayIn_10ms = scan_pause_delay_in_am_10ms;
+	else
 #ifdef ENABLE_FASTER_CHANNEL_SCAN
-	gScanPauseDelayIn_10ms = 9;  // 90ms .. <= ~60ms it misses signals (squelch response and/or PLL lock time) ?
+		gScanPauseDelayIn_10ms = 9;  // 90ms .. <= ~60ms it misses signals (squelch response and/or PLL lock time) ?
 #else
-	gScanPauseDelayIn_10ms = scan_pause_delay_in_3_10ms;
+		gScanPauseDelayIn_10ms = scan_pause_delay_in_3_10ms;
 #endif
 
 	if (enabled)

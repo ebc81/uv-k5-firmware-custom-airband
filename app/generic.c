@@ -96,6 +96,27 @@ void GENERIC_Key_F(bool bKeyPressed, bool bKeyHeld)
 	}
 }
 
+#ifndef ENABLE_TX
+void GENERIC_Key_PTT(bool bKeyPressed)
+{	// receive-only build: the PTT can never key the radio.
+	// The scan-cancel behaviour of the original is kept, since stopping a scan
+	// with the PTT is useful on a scanner and cannot transmit.
+	gInputBoxIndex = 0;
+
+	if (!bKeyPressed)
+		return;
+
+	if (SCANNER_IsScanning())
+		SCANNER_Stop();                 // CTCSS/CDCSS scanning .. stop
+	else if (gScanStateDir != SCAN_OFF)
+		CHFRSCANNER_Stop();             // frequency/channel scanning .. stop
+
+	if (gPttIsPressed)
+		gPttWasPressed = true;
+
+	gPttDebounceCounter = 0;
+}
+#else
 void GENERIC_Key_PTT(bool bKeyPressed)
 {
 	gInputBoxIndex = 0;
@@ -223,3 +244,4 @@ done:
 	gUpdateStatus  = true;
 	gUpdateDisplay = true;
 }
+#endif // ENABLE_TX

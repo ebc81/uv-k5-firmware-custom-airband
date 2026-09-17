@@ -1,17 +1,30 @@
-# Open re-implementation of the Quansheng UV-K5/K6/5R v2.1.27 firmware
+# Quansheng UV-K5 firmware — airband edition (receive only)
 
-This repository is a merge of [OneOfEleven custom firmware](https://github.com/OneOfEleven/uv-k5-firmware-custom) with [fagci spectrum analizer](https://github.com/fagci/uv-k5-firmware-fagci-mod/tree/refactor) plus my few changes.<br>
-All is a cloned and customized version of DualTachyon's open firmware found [here](https://github.com/DualTachyon/uv-k5-firmware) ... a cool achievement !
+A build of the Quansheng UV-K5/K6/5R open firmware tuned for **AM airband reception
+(108–137 MHz)**, with the AM AGC ("AM fix") reworked and **all transmit functionality removed**.
 
-> [!TIP]
-> There is a work done by others on forks of this repository. I encourage you to take a look at those too. [SEE HERE](https://github.com/egzumer/uv-k5-firmware-custom/discussions/485)
+This repository is a fork of [egzumer's custom firmware](https://github.com/egzumer/uv-k5-firmware-custom),
+itself a merge of [OneOfEleven's custom firmware](https://github.com/OneOfEleven/uv-k5-firmware-custom)
+with [fagci's spectrum analyzer](https://github.com/fagci/uv-k5-firmware-fagci-mod/tree/refactor).<br>
+All of it is a cloned and customized version of DualTachyon's open firmware found
+[here](https://github.com/DualTachyon/uv-k5-firmware) ... a cool achievement !
 
-> [!WARNING]  
-> Use this firmware at your own risk (entirely). There is absolutely no guarantee that it will work in any way shape or form on your radio(s), it may even brick your radio(s), in which case, you'd need to buy another radio.
-Anyway, have fun.
+> [!IMPORTANT]
+> **This firmware cannot transmit.** It is built with `ENABLE_TX = 0`, which removes the whole
+> transmit path: the power amplifier is never enabled and the transmit state is unreachable, so
+> the radio physically cannot key up. PTT does nothing (it still stops a scan). This is a
+> stronger guarantee than the `F_LOCK` frequency table, which the hidden `F_LOCK_NONE` setting
+> can defeat. Set `ENABLE_TX = 1` in the `Makefile` if you want a transmit-capable build.
+
+> [!WARNING]
+> Use this firmware at your own risk (entirely). There is absolutely no guarantee that it will
+> work in any way shape or form on your radio(s), it may even brick your radio(s), in which case,
+> you'd need to buy another radio. Anyway, have fun.
 
 ## Table of Contents
 
+* [Airband changes](#airband-changes)
+* [Flashing](#flashing)
 * [Main Features](#main-features)
 * [Manual](#manual)
 * [Radio Performance](#radio-performance)
@@ -23,7 +36,82 @@ Anyway, have fun.
 * [License](#license)
 * [Example changes/updates](#example-changesupdates)
 
+## Airband changes
+
+Everything below is what this fork adds on top of egzumer's firmware.
+
+### AM AGC ("AM fix") rewritten
+
+The BK4819 has no usable AGC for AM, so the firmware rides the front-end gain register itself,
+every 10 ms. The original loop fed the *instantaneous* RSSI into its control law — but on a
+modulated AM carrier the RSSI **is** the audio envelope, so the AGC ended up modulating the gain
+at audio rate. That is the "pumping" and distortion. Three things changed:
+
+* **Peak detector.** The control variable is now the maximum RSSI over an 80 ms sliding window,
+  so the modulation envelope never reaches the loop.
+* **Asymmetric attack/decay.** Gain still drops fast, because overload has to be corrected
+  immediately, but it is restored one table step every 4/8/16 ticks instead of every single
+  tick — the original ramped at roughly 200–300 dB/s. There is also a real deadband around the
+  target instead of the old hold-rearm trick, which is what made it hunt.
+* **The squelch no longer fights the AGC.** The squelch is a hardware comparator on *post-gain*
+  RSSI, so every gain step used to move the squelch reference underneath it, which is why weak
+  signals dropped out. Both RSSI thresholds are now shifted by however much gain has been taken
+  away, so the squelch decision is independent of what the AGC is doing.
+
+### Other airband work
+
+* **AM RX bandwidth is selectable** (`AM BW`: 25 / 12.5 / 6.25 kHz, default 12.5 kHz). 6.25 kHz
+  was previously unreachable from the normal RX path, because the per-channel WIDE/NARROW
+  setting is a single bit.
+* **Shorter AM squelch open delay**, so the first syllable of a short ATC transmission is not
+  cut off. FM timing is unchanged.
+* **AM keeps a working noise/glitch squelch criterion.** `ENABLE_SQUELCH_MORE_SENSITIVE` doubles
+  the noise-open threshold, which for the factory VHF value exceeds the clamp and silently
+  disables that criterion altogether; AM now scales it more gently.
+* **Longer scan dwell in AM** (150 ms vs 90 ms), since the AM squelch delay plus AGC settling
+  does not fit in the FM dwell — weak signals were being skipped.
+* **Airband defaults**: entering a frequency in 108–137 MHz selects AM and the 8.33 kHz channel
+  grid automatically. Upstream keyed this off a VFO slot index rather than the frequency, and
+  that test never actually fired.
+
+8.33 kHz channel handling was already correct upstream and is unchanged: typing the ICAO channel
+designator (`118.005`, `118.010`, `118.015`, `118.030`) tunes the true carrier, re-syncing to the
+25 kHz grid every fourth channel.
+
+### New menu items
+
+| Item | Values | Default | What it does |
+| --- | --- | --- | --- |
+| `AM BW` | 25k / 12.5k / 6.25k | 12.5k | RX filter bandwidth used in AM |
+| `AMTarg` | −100 … −70 dBm | −89 dBm | AM AGC target level |
+| `AMSpd` | FAST / MED / SLOW | MED | how fast the AM AGC restores gain |
+
+> [!TIP]
+> `AMTarg` is the number most worth tuning for your individual radio. The −89 dBm default is the
+> original author's *estimate* of where the AM demodulator starts to clip, not a measurement.
+> Sweep it down until distortion returns, then back off.
+
+### Upstream bugs fixed
+
+* `RADIO_SetupAGC()` shifted two flags into the same bit, so its memoisation could skip
+  reprogramming the AGC when switching between AM and FM.
+* A band check compared `.upper` against itself and was always false.
+* The squelch close-delay field was written with a value too wide for it, which collided with
+  the open-delay field.
+
+## Flashing
+
+Download `firmware.packed.bin` from the [releases page](https://github.com/ebc81/uv-k5-firmware-custom-airband/releases)
+and flash it with the [online flasher](https://egzumer.github.io/uvtools) or any Quansheng
+flashing tool. `firmware.bin` is the raw image and is only useful over SWD.
+
 ## Main features:
+
+> [!NOTE]
+> The list below is inherited from upstream. Transmit-related entries (mic bar, TX power,
+> TX tones, roger beep, TX timeout, PTT ID, DTMF calling, VOX) are **not** present in this
+> build - see the note at the top of this README.
+
 * many of OneOfEleven mods:
    * AM fix, huge improvement in reception quality
    * long press buttons functions replicating F+ action
@@ -72,6 +160,12 @@ adjustment I do (AM fix) reaches the hardwares limit, your AM RX audio will be a
 non-existent (just like Quansheng's firmware).
 On the other hand, FM RX audio will/should be fine.
 
+That limit still applies here — no firmware change can give the front end a band-pass filter or
+more dynamic range. What the [reworked AM AGC](#am-agc-am-fix-rewritten) does address is the
+part that *was* self-inflicted: the loop chasing the modulation envelope, recovering gain far
+too quickly, and dragging the squelch threshold around with it. Expect cleaner audio on strong
+signals and fewer dropouts on weak ones, not a different radio.
+
 But, they are nice toys for the price, fun to play with.
 
 ## User customization
@@ -83,6 +177,9 @@ You'll find the options at the top of "Makefile" ('0' = disable, '1' = enable) .
 
 |Build option | Description |
 | --- | ---- |
+|🧰 **AIRBAND EDITION**||
+| ENABLE_TX | **default 0.** Transmit support. With 0 the whole TX path is removed, the PA is never enabled and the radio cannot key up. Set to 1 for a transmit-capable build. |
+| ENABLE_AIRBAND_DEFAULTS | AM + 8.33kHz selected automatically for 108-137MHz |
 |🧰 **STOCK QUANSHENG FEATURES**||
 | ENABLE_UART | without this you can't configure radio via PC ! |
 | ENABLE_AIRCOPY | easier to just enter frequency with butts |
@@ -108,10 +205,10 @@ You'll find the options at the top of "Makefile" ('0' = disable, '1' = enable) .
 | ENABLE_SHOW_CHARGE_LEVEL | show the charge level when the radio is on charge |
 | ENABLE_REVERSE_BAT_SYMBOL | mirror the battery symbol on the status bar (+ pole on the right) |
 | ENABLE_NO_CODE_SCAN_TIMEOUT | disable 32-sec CTCSS/DCS scan timeout (press exit butt instead of time-out to end scan) |
-| ENABLE_AM_FIX | dynamically adjust the front end gains when in AM mode to help prevent AM demodulator saturation, ignore the on-screen RSSI level (for now) |
+| ENABLE_AM_FIX | dynamically adjust the front end gains when in AM mode to help prevent AM demodulator saturation. Reworked in this fork, see [Airband changes](#airband-changes). Also adds the `AMTarg` and `AMSpd` menu items |
 | ENABLE_AM_FIX_SHOW_DATA | show debug data for the AM fix |
-| ENABLE_SQUELCH_MORE_SENSITIVE | make squelch levels a little bit more sensitive - I plan to let user adjust the values themselves |
-| ENABLE_FASTER_CHANNEL_SCAN | increases the channel scan speed, but the squelch is also made more twitchy |
+| ENABLE_SQUELCH_MORE_SENSITIVE | make squelch levels a little bit more sensitive. Note it doubles the noise-open threshold past its clamp, which disables the noise criterion entirely - AM scales it more gently in this fork |
+| ENABLE_FASTER_CHANNEL_SCAN | increases the channel scan speed, but the squelch is also made more twitchy. AM uses its own longer dwell regardless |
 | ENABLE_RSSI_BAR | enable a dBm/Sn RSSI bar graph level in place of the little antenna symbols |
 | ENABLE_AUDIO_BAR | experimental, display an audio bar level when TX'ing |
 | ENABLE_COPY_CHAN_TO_VFO | copy current channel settings into frequency mode. Long press `1 BAND` when in channel mode |
@@ -132,14 +229,37 @@ You'll find the options at the top of "Makefile" ('0' = disable, '1' = enable) .
 
 ## Compiler
 
-arm-none-eabi GCC version 10.3.1 is recommended, which is the current version on Ubuntu 22.04.03 LTS.
-Other versions may generate a flash file that is too big.
+arm-none-eabi GCC version 10.3.1 is recommended upstream, which is the current version on
+Ubuntu 22.04.03 LTS. Other versions may generate a flash file that is too big.
 You can get an appropriate version from: https://developer.arm.com/downloads/-/gnu-rm
+
+The v0.1 airband release was built with GCC 13.2.1 (Ubuntu 24.04 `gcc-arm-none-eabi`) and fits
+comfortably. Note the build uses `-Werror -Wextra`, so a different compiler version can fail the
+build on new warnings in otherwise untouched code.
 
 clang may be used but isn't fully supported. Resulting binaries may also be bigger.
 You can get it from: https://releases.llvm.org/download.html
 
 ## Building
+
+### WSL / Linux build method
+
+This is what the released binaries are built with.
+
+```bash
+# one-time
+sudo apt-get install -y gcc-arm-none-eabi binutils-arm-none-eabi libnewlib-arm-none-eabi make python3-crcmod
+
+# build
+git clone --recurse-submodules https://github.com/ebc81/uv-k5-firmware-custom-airband.git
+cd uv-k5-firmware-custom-airband
+make clean && make
+arm-none-eabi-size firmware     # text + data must be <= 61440
+```
+
+This produces `firmware.bin` (raw) and `firmware.packed.bin` (the file to flash).
+The flash budget is 60 KB and the link fails outright on overflow, so check the size after
+enabling extra options.
 
 ### Github Codespace build method
 

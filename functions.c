@@ -136,6 +136,7 @@ void FUNCTION_PowerSave() {
 		GUI_SelectNextDisplay(DISPLAY_MAIN);
 }
 
+#ifdef ENABLE_TX
 void FUNCTION_Transmit()
 {
 	// if DTMF is enabled when TX'ing, it changes the TX audio filtering !! .. 1of11
@@ -223,6 +224,7 @@ void FUNCTION_Transmit()
 		BACKLIGHT_TurnOn();
 	}
 }
+#endif // ENABLE_TX
 
 
 
@@ -249,7 +251,9 @@ void FUNCTION_Select(FUNCTION_Type_t Function)
 			return;
 
 		case FUNCTION_TRANSMIT:
+#ifdef ENABLE_TX
 			FUNCTION_Transmit();
+#endif
 			break;
 
 		case FUNCTION_MONITOR:

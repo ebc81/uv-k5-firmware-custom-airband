@@ -706,6 +706,7 @@ static void CheckRadioInterrupts(void)
 	}
 }
 
+#ifdef ENABLE_TX
 void APP_EndTransmission(void)
 {
 	// back to RX mode
@@ -718,6 +719,7 @@ void APP_EndTransmission(void)
 		gFlagReconfigureVfos = true;
 	}
 }
+#endif
 
 #ifdef ENABLE_VOX
 static void HandleVox(void)
@@ -802,6 +804,7 @@ void APP_Update(void)
 	}
 #endif
 
+#ifdef ENABLE_TX
 	if (gCurrentFunction == FUNCTION_TRANSMIT && (gTxTimeoutReached || SerialConfigInProgress()))
 	{	// transmitter timed out or must de-key
 		gTxTimeoutReached = false;
@@ -814,6 +817,7 @@ void APP_Update(void)
 
 		GUI_DisplayScreen();
 	}
+#endif
 
 	if (gReducedService)
 		return;
@@ -1867,10 +1871,12 @@ Skip:
 		MENU_ShowCurrentSetting();
 	}
 
+#ifdef ENABLE_TX
 	if (gFlagPrepareTX) {
 		RADIO_PrepareTX();
 		gFlagPrepareTX = false;
 	}
+#endif
 
 #ifdef ENABLE_VOICE
 	if (gAnotherVoiceID != VOICE_ID_INVALID) {

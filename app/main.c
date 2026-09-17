@@ -363,6 +363,20 @@ static void MAIN_Key_DIGITS(KEY_Code_t Key, bool bKeyPressed, bool bKeyHeld)
 				RADIO_ConfigureChannel(Vfo, VFO_CONFIGURE_RELOAD);
 			}
 
+#ifdef ENABLE_AIRBAND_DEFAULTS
+			if (band == BAND2_108MHz)
+			{	// airband: AM on the 8.33kHz channel grid.
+				// this has to happen before the rounding below, so that the ICAO
+				// channel designator just typed is mapped onto the right carrier
+				gTxVfo->Modulation = MODULATION_AM;
+
+				if (gTxVfo->STEP_SETTING != STEP_8_33kHz) {
+					gTxVfo->STEP_SETTING  = STEP_8_33kHz;
+					gTxVfo->StepFrequency = gStepFrequencyTable[STEP_8_33kHz];
+				}
+			}
+#endif
+
 			Frequency = FREQUENCY_RoundToStep(Frequency, gTxVfo->StepFrequency);
 
 			if (Frequency >= BX4819_band1.upper && Frequency < BX4819_band2.lower)

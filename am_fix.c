@@ -207,6 +207,44 @@ typedef union  {
 }
 #endif
 
+// ---------------------------------------------------------------------------
+// AGC tuning constants
+//
+// The BK4819 has no usable AM AGC, so this module drives the front end gain
+// register (REG_13) itself. The thing that makes AM different from FM here is
+// that on a modulated AM carrier the RSSI *is* the audio envelope - so a loop
+// that follows the instantaneous RSSI ends up modulating the gain at audio
+// rate, which is heard as pumping and distortion.
+//
+// Two properties avoid that:
+//   1. the control variable is the PEAK RSSI over a short window, not the
+//      instantaneous sample, so the audio envelope never reaches the loop;
+//   2. attack and decay are asymmetric - reduce gain fast (overload has to be
+//      corrected immediately), restore it slowly.
+
+// how far back the peak detector looks, in 10ms ticks.
+// 8 ticks = 80ms, which spans the whole AM audio band with room to spare.
+#define AM_FIX_PEAK_WINDOW      8
+
+// hold-off before gain is allowed to increase again, in 10ms ticks
+#define AM_FIX_HOLD_TICKS      30   // 300ms
+
+// short settle after a retune, so a scan step does not start ramping instantly
+#define AM_FIX_SETTLE_TICKS     5   // 50ms
+
+// deadband around the target, in dB. The loop does nothing inside this window,
+// which is what stops it hunting around the target.
+#define AM_FIX_MARGIN_HI        0   // dB above target before gain is reduced
+#define AM_FIX_MARGIN_LO        8   // dB below target before gain is increased
+
+// above this error we jump straight to a new table entry instead of stepping
+#define AM_FIX_FAST_JUMP_DB    10
+// ... but stay this far away from the target, for noise/spike immunity
+#define AM_FIX_JUMP_GUARD_DB    8
+
+// ticks between single gain steps on the way up, indexed by gSetting_AM_speed.
+// Table steps average 2-3dB, so these are roughly 60, 30 and 15 dB/s.
+static const uint8_t decay_ticks[] = {4, 8, 16};
 
 #ifdef ENABLE_AM_FIX_SHOW_DATA
 	// display update rate
@@ -217,21 +255,121 @@ typedef union  {
 unsigned int gain_table_index[2] = {0, 0};
 // used simply to detect a changed gain setting
 unsigned int gain_table_index_prev[2] = {0, 0};
-// holds the previous RSSI level .. we do an average of old + new RSSI reading
+// holds the most recent RSSI reading (for the debug display)
 int16_t prev_rssi[2] = {0, 0};
 // to help reduce gain hunting, peak hold count down tick
 unsigned int hold_counter[2] = {0, 0};
-// -89dBm, any higher and the AM demodulator starts to saturate/clip/distort
-const int16_t desired_rssi = (-89 + 160) * 2;
+
+// sliding window of raw RSSI samples, used as a peak detector
+static int16_t  rssi_hist[2][AM_FIX_PEAK_WINDOW];
+static uint8_t  rssi_hist_pos[2];
+static uint8_t  rssi_hist_len[2];
+
+// counts ticks between gain increases
+static uint8_t  decay_counter[2];
+
+// the gain entry we start from - the one closest to the stock QS setting
+static unsigned int start_index = 1;
+
+// the un-offset squelch RSSI thresholds, as programmed by BK4819_SetupSquelch
+static uint8_t squelch_base_open;
+static uint8_t squelch_base_close;
+static bool    squelch_base_valid;
+// the offset currently programmed, so we don't rewrite REG_78 needlessly
+static int16_t squelch_shift_applied;
 
 int8_t currentGainDiff;
 bool enabled = true;
 
+// the level we try to hold the carrier at, in the BK4819's raw RSSI units
+// (0.5dB/step, -160dBm offset). Anything higher and the AM demodulator starts
+// to saturate/clip/distort.
+static int16_t AM_fix_desired_rssi(void)
+{
+	int16_t dBm = AM_FIX_TARGET_DBM_MIN + (int16_t)gSetting_AM_target;
+
+	if (dBm < AM_FIX_TARGET_DBM_MIN || dBm > AM_FIX_TARGET_DBM_MAX)
+		dBm = AM_FIX_TARGET_DBM_DEFAULT;
+
+	return (int16_t)((dBm + 160) * 2);
+}
+
+// shift the squelch comparator by however much front end gain we have taken away.
+//
+// REG_78 works on post-gain RSSI, so without this every gain step would move the
+// squelch reference underneath the comparator and the squelch would chatter in
+// step with the AGC - which is exactly what makes weak AM signals drop out.
+static void AM_fix_apply_squelch_shift(void)
+{
+	if (!squelch_base_valid)
+		return;
+
+	// currentGainDiff is positive when we have REMOVED gain relative to the stock
+	// entry, so the chip sees a correspondingly lower RSSI. REG_78 is 0.5dB/step.
+	const int16_t shift = (int16_t)currentGainDiff * 2;
+
+	if (shift == squelch_shift_applied)
+		return;
+	squelch_shift_applied = shift;
+
+	int16_t open  = (int16_t)squelch_base_open  - shift;
+	int16_t close = (int16_t)squelch_base_close - shift;
+
+	open  = (open  <   0) ?   0 : (open  > 255) ? 255 : open;
+	close = (close <   0) ?   0 : (close > 255) ? 255 : close;
+
+	BK4819_SetSquelchRSSIThresholds((uint8_t)open, (uint8_t)close);
+}
+
+void AM_fix_set_squelch_base(uint8_t open, uint8_t close)
+{	// called by RADIO_SetupRegisters right after it programs the squelch
+	squelch_base_open     = open;
+	squelch_base_close    = close;
+	squelch_base_valid    = true;
+	squelch_shift_applied = 0;
+
+	if (enabled)
+	{	// re-apply our offset on top of the freshly programmed thresholds
+		AM_fix_apply_squelch_shift();
+	}
+}
+
 void AM_fix_init(void)
 {	// called at boot-up
-	for (int i = 0; i < 2; i++) {
-		gain_table_index[i] = 0;  // re-start with original QS setting
+
+	// find the table entry closest to the stock QS gain. Entry 0 is the stock
+	// setting but sits outside the monotonic 1..N-1 ordering the loop walks, so
+	// starting the loop at 0 would make its first downward step an ~86dB cliff.
+	{
+		const int8_t stock_dB = gain_table[0].gain_dB;
+		unsigned int best     = 1;
+		int16_t      best_err = 32767;
+
+		for (unsigned int i = 1; i < gain_table_size; i++)
+		{
+			int16_t err = (int16_t)gain_table[i].gain_dB - stock_dB;
+			if (err < 0)
+				err = -err;
+			if (err < best_err)
+			{
+				best_err = err;
+				best     = i;
+			}
+		}
+		start_index = best;
 	}
+
+	for (int i = 0; i < 2; i++) {
+		gain_table_index[i]      = start_index;
+		gain_table_index_prev[i] = 0xFFFF;   // force the first register write
+		rssi_hist_pos[i]         = 0;
+		rssi_hist_len[i]         = 0;
+		decay_counter[i]         = 0;
+		hold_counter[i]          = 0;
+		prev_rssi[i]             = 0;
+	}
+
+	currentGainDiff = 0;
 #if !LOOKUP_TABLE
 	CreateTable();
 #endif
@@ -246,9 +384,17 @@ void AM_fix_reset(const unsigned vfo)
 		counter = 0;
 	#endif
 
-	prev_rssi[vfo] = 0;
-	hold_counter[vfo] = 0;
-	gain_table_index_prev[vfo] = 0;
+	prev_rssi[vfo]     = 0;
+	decay_counter[vfo] = 0;
+
+	// drop the peak history - it belongs to the old frequency
+	rssi_hist_pos[vfo] = 0;
+	rssi_hist_len[vfo] = 0;
+
+	// deliberately keep gain_table_index: on a scan step the neighbouring channel
+	// is usually at a similar level, and re-converging from scratch takes longer
+	// than the scan dwell. Just hold briefly while the peak window refills.
+	hold_counter[vfo] = AM_FIX_SETTLE_TICKS;
 }
 
 // adjust the RX gain to try and prevent the AM demodulator from
@@ -286,11 +432,22 @@ void AM_fix_10ms(const unsigned vfo)
 	}
 
 	int16_t rssi;
-	{	// sample the current RSSI level
-		// average it with the previous rssi (a bit of noise/spike immunity)
+	{	// sample the current RSSI level and take the peak over the recent window.
+		// Using the peak rather than the instantaneous value is what keeps the AM
+		// modulation envelope out of the control loop.
 		const int16_t new_rssi = BK4819_GetRSSI();
-		rssi                   = (prev_rssi[vfo] > 0) ? (prev_rssi[vfo] + new_rssi) / 2 : new_rssi;
-		prev_rssi[vfo]         = new_rssi;
+
+		rssi_hist[vfo][rssi_hist_pos[vfo]] = new_rssi;
+		rssi_hist_pos[vfo] = (uint8_t)((rssi_hist_pos[vfo] + 1) % AM_FIX_PEAK_WINDOW);
+		if (rssi_hist_len[vfo] < AM_FIX_PEAK_WINDOW)
+			rssi_hist_len[vfo]++;
+
+		rssi = rssi_hist[vfo][0];
+		for (unsigned int i = 1; i < rssi_hist_len[vfo]; i++)
+			if (rssi_hist[vfo][i] > rssi)
+				rssi = rssi_hist[vfo][i];
+
+		prev_rssi[vfo] = new_rssi;
 	}
 
 #ifdef ENABLE_AM_FIX_SHOW_DATA
@@ -315,15 +472,18 @@ void AM_fix_10ms(const unsigned vfo)
 		hold_counter[vfo]--;
 
 	// dB difference between actual and desired RSSI level
-	int16_t diff_dB = (rssi - desired_rssi) / 2;
+	const int16_t diff_dB = (rssi - AM_fix_desired_rssi()) / 2;
 
-	if (diff_dB > 0) {	// decrease gain
+	if (diff_dB > AM_FIX_MARGIN_HI)
+	{	// too strong - reduce the gain, quickly
 		unsigned int index = gain_table_index[vfo];   // current position we're at
 
-		if (diff_dB >= 10) {	// jump immediately to a new gain setting
+		if (diff_dB >= AM_FIX_FAST_JUMP_DB)
+		{	// jump immediately to a new gain setting
 			// this greatly speeds up initial gain reduction (but reduces noise/spike immunity)
 
-			const int16_t desired_gain_dB = (int16_t)gain_table[index].gain_dB - diff_dB + 8; // get no closer than 8dB (bit of noise/spike immunity)
+			const int16_t desired_gain_dB =
+				(int16_t)gain_table[index].gain_dB - diff_dB + AM_FIX_JUMP_GUARD_DB;
 
 			// scan the table to see what index to jump straight too
 			while (index > 1)
@@ -341,30 +501,50 @@ void AM_fix_10ms(const unsigned vfo)
 		if (gain_table_index[vfo] != index)
 		{
 			gain_table_index[vfo] = index;
-			hold_counter[vfo] = 30;       // 300ms hold
+			decay_counter[vfo]    = 0;
 		}
+
+		hold_counter[vfo] = AM_FIX_HOLD_TICKS;
 	}
+	else if (diff_dB >= -AM_FIX_MARGIN_LO)
+	{	// inside the deadband - leave the gain exactly where it is.
+		// this is what stops the loop hunting around the target level
+		hold_counter[vfo]  = AM_FIX_HOLD_TICKS;
+		decay_counter[vfo] = 0;
+	}
+	else if (hold_counter[vfo] == 0)
+	{	// too weak and the hold has expired - restore gain, SLOWLY.
+		// one table step every 'decay_ticks' rather than every tick: stepping every
+		// tick ramps at 200-300dB/s, which is audible as pumping on a fading signal
+		uint8_t speed = gSetting_AM_speed;
+		if (speed >= ARRAY_SIZE(decay_ticks))
+			speed = AM_FIX_SPEED_DEFAULT;
 
-	if (diff_dB >= -6)                    // 6dB hysterisis (help reduce gain hunting)
-		hold_counter[vfo] = 30;           // 300ms hold
-
-	if (hold_counter[vfo] == 0)
-	{	// hold has been released, we're free to increase gain
-		const unsigned int index = gain_table_index[vfo] + 1;                 // move up to next gain index
-		gain_table_index[vfo] = MIN(index, gain_table_size - 1u);
+		if (++decay_counter[vfo] >= decay_ticks[speed])
+		{
+			decay_counter[vfo] = 0;
+			gain_table_index[vfo] = MIN(gain_table_index[vfo] + 1, gain_table_size - 1u);
+		}
 	}
 
 
 	{	// apply the new settings to the front end registers
 		const unsigned int index = gain_table_index[vfo];
 
-		// remember the new table index
-		gain_table_index_prev[vfo] = index;
-		currentGainDiff = gain_table[0].gain_dB - gain_table[index].gain_dB;
-		BK4819_WriteRegister(BK4819_REG_13, gain_table[index].reg_val);
+		if (index != gain_table_index_prev[vfo])
+		{
+			// remember the new table index
+			gain_table_index_prev[vfo] = index;
+			currentGainDiff = gain_table[0].gain_dB - gain_table[index].gain_dB;
+			BK4819_WriteRegister(BK4819_REG_13, gain_table[index].reg_val);
+
+			// keep the squelch comparator referenced to the signal, not to our gain
+			AM_fix_apply_squelch_shift();
+
 #ifdef ENABLE_AGC_SHOW_DATA
-		UI_MAIN_PrintAGC(true);
+			UI_MAIN_PrintAGC(true);
 #endif
+		}
 	}
 
 #ifdef ENABLE_AM_FIX_SHOW_DATA
@@ -392,6 +572,29 @@ int8_t AM_fix_get_gain_diff()
 
 void AM_fix_enable(bool on)
 {
+	if (enabled == on)
+		return;
+
 	enabled = on;
+
+	if (on)
+	{	// force the gain and squelch offset to be reprogrammed on the next tick
+		for (int i = 0; i < 2; i++)
+		{
+			gain_table_index_prev[i] = 0xFFFF;
+			rssi_hist_len[i]         = 0;
+			rssi_hist_pos[i]         = 0;
+			decay_counter[i]         = 0;
+			hold_counter[i]          = AM_FIX_SETTLE_TICKS;
+		}
+	}
+	else
+	{	// hand the front end and the squelch back in a known-good state,
+		// otherwise whatever gain reduction we had applied would stick around
+		// after switching away from AM
+		currentGainDiff = 0;
+		BK4819_WriteRegister(BK4819_REG_13, gain_table[0].reg_val);
+		AM_fix_apply_squelch_shift();
+	}
 }
 #endif
