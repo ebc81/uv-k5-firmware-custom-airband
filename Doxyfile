@@ -1,4 +1,4 @@
-OUTPUT_DIRECTORY       = docs
+OUTPUT_DIRECTORY       = doxygen
 GENERATE_LATEX         = NO
 GENERATE_RTF           = NO
 GENERATE_MAN           = NO

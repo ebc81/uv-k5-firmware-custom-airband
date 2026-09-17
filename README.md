@@ -34,7 +34,6 @@ All of it is a cloned and customized version of DualTachyon's open firmware foun
 * [Credits](#credits)
 * [Other sources of information](#other-sources-of-information)
 * [License](#license)
-* [Example changes/updates](#example-changesupdates)
 
 ## Airband changes
 
@@ -151,6 +150,8 @@ Airband-specific documentation is in **[this repository's wiki](https://github.c
 * [Menu Reference](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Menu-Reference) — every menu item in this build
 * [Receive Only](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Receive-Only) — what was removed, and how to build a TX-capable image
 * [Building](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Building) — compiling from source
+
+The same pages are mirrored in [`docs/`](docs/) so they are versioned with the firmware.
 
 For everything inherited from upstream, the [egzumer wiki](https://github.com/egzumer/uv-k5-firmware-custom/wiki) is still the reference — bearing in mind it documents a transmit-capable radio.
 
@@ -359,17 +360,3 @@ You may obtain a copy of the License at
     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
     See the License for the specific language governing permissions and
     limitations under the License.
-
-## Example changes/updates
-
-<p float="left">
-  <img src="/images/image1.png" width=300 />
-  <img src="/images/image2.png" width=300 />
-  <img src="/images/image3.png" width=300 />
-</p>
-
-Video showing the AM fix working ..
-
-<video src="/images/AM_fix.mp4"></video>
-
-<video src="https://github.com/OneOfEleven/uv-k5-firmware-custom/assets/51590168/2a3a9cdc-97da-4966-bf0d-1ce6ad09779c"></video>
