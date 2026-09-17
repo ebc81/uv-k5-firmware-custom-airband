@@ -144,7 +144,15 @@ flashing tool. `firmware.bin` is the raw image and is only useful over SWD.
 
  ## Manual
 
-Up to date manual is available in the [Wiki section](https://github.com/egzumer/uv-k5-firmware-custom/wiki)
+Airband-specific documentation is in **[this repository's wiki](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki)**:
+
+* [Airband Guide](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Airband-Guide) — tuning channels, 8.33 kHz, bandwidth, scanning
+* [AM AGC Tuning](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/AM-AGC-Tuning) — how to tune `AMTarg` and `AMSpd` for your radio
+* [Menu Reference](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Menu-Reference) — every menu item in this build
+* [Receive Only](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Receive-Only) — what was removed, and how to build a TX-capable image
+* [Building](https://github.com/ebc81/uv-k5-firmware-custom-airband/wiki/Building) — compiling from source
+
+For everything inherited from upstream, the [egzumer wiki](https://github.com/egzumer/uv-k5-firmware-custom/wiki) is still the reference — bearing in mind it documents a transmit-capable radio.
 
 ## Radio performance
 
