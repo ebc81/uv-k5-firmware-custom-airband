@@ -254,6 +254,24 @@ Recorded so they are not rediscovered. Those marked *fixed* were corrected in th
   the "*3" the comment claims. Watch out when reasoning about this one: adding the terms
   instead of OR-ing them gives `0x7400` and the wrong conclusion that the open delay was 6.
   FM now keeps 5/2 explicitly (unchanged behaviour); AM uses a shorter open delay of 2.
+- *fixed* - `am_fix.c` gain table entry 39 was `{0x038F, -6}`, but `0x038F` selects mixer index
+  1, not 3, so it is **-12 dB, not -6 dB** - contradicting the entry's own `3 4 3 7` comment.
+  The correct value is `0x039F`. This was live: `AM_fix_init()` starts from the entry closest to
+  the stock -7 dB, which is exactly index 39, so every boot programmed the front end 6 dB low and
+  left `currentGainDiff` - and with it the squelch shift and the dBm display - wrong until the
+  control loop stepped away from the start index.
+- *fixed* - `CreateTable()` (the `LOOKUP_TABLE 0` path) had two defects. `memmove(gain + 1, gain,
+  100 - i)` passed an element count where `memmove` wants bytes, and `t_gain_table` is a packed
+  3-byte struct, so it shifted a third of the data it meant to. And it used `gain_dB == 0` as its
+  empty-slot marker, which swallowed the legitimate 0 dB entry - the top of the table came out
+  `0x0000`, i.e. minimum gain where maximum was intended. Note that `(100 - i) * sizeof(*gain)`
+  is **not** the fix: it runs 3 bytes past the end of the 300-byte array. The count is
+  `(ARRAY_SIZE(gain_table) - i - 1) * sizeof(*gain)`.
+- *fixed* - `CreateTable()`'s `GainData` union: the bitfields cover bits `<9:0>`, leaving 6
+  padding bits whose value C leaves unspecified - and `__raw` is written straight into REG_13.
+  GCC fills them differently per target and optimisation level (armhf `-O0` returns `0x15` in
+  `<15:10>`; x86-64 happens to return zero). Now zeroed with `{.__raw = 0}` before the fields are
+  assigned. Caught by `utils/gain_table_audit.py`, not by any build.
 - **not fixed** - `CheckRadioInterrupts()` writes `REG_02 = 0` to clear the interrupt latch
   *before* reading `REG_02` to fetch the flags. It works on this part, but the ordering is
   race-prone. Left alone deliberately: it sits in the middle of the RX state machine.
@@ -262,8 +280,12 @@ Recorded so they are not rediscovered. Those marked *fixed* were corrected in th
 - **not fixed** - `radio.c` uses `#if ENABLE_SQUELCH_MORE_SENSITIVE` where every other flag test
   uses `#ifdef`. It works only because GCC evaluates the bare defined macro as 1.
 - Note `ENABLE_SQUELCH_MORE_SENSITIVE` doubles the noise-open threshold, which for the factory
-  VHF value (65) exceeds the 127 clamp - so **the noise criterion is effectively disabled** and
-  only the halved RSSI-open and doubled glitch-open survive.
+  VHF value (65) would exceed the 127 clamp - disabling the noise criterion outright and leaving
+  an RSSI-only squelch. **This tree scales AM by 3/2 instead** (`radio.c`), giving noise-open 97
+  and keeping the criterion live; FM still uses the stock x2. That matters for `am_fix.c`: it
+  halves the RSSI-open threshold too, so the base the AM fix shifts from is only ~25 units
+  (~12.5 dB). Past roughly 13 dB of gain reduction the shifted thresholds clamp at 0 and the
+  RSSI criterion drops out of the squelch entirely - noise and glitch are what still gate it.
 - `BK4819_GetExNoiceIndicator` is a typo in upstream's exported API. There is no
   `BK4819_GetNoiseIndicator`.
 - `BK4819_SetupSquelch()` takes glitch arguments **close-then-open** while RSSI and noise are
@@ -271,7 +293,21 @@ Recorded so they are not rediscovered. Those marked *fixed* were corrected in th
 
 ## Testing
 
-There are no unit tests and no emulator - verification is a clean build plus on-radio checks.
+There is no emulator for the radio itself - verification is a clean build plus on-radio checks.
+The one exception is the `am_fix.c` gain tables, which are plain C and can be audited on the
+host. Run this after touching them:
+
+```bash
+sudo apt-get install -y build-essential gcc-arm-linux-gnueabihf qemu-user-static  # one-time
+python3 utils/gain_table_audit.py
+```
+
+It reads `am_fix.c` directly, so it cannot drift from the source, and checks that every entry
+decodes back to the dB it claims, that both tables are monotonic, and that nothing sets a bit
+above REG_13's `<9:0>`. Build it for ARM as well as natively - `arm-linux-gnueabihf` is ARMv7-A
+rather than the radio's ARMv6-M Cortex-M0, but it has the right data model and catches
+ABI-sensitive bugs. It is what exposed the union padding leak listed above, which every firmware
+build had happily accepted.
 
 Static checks that are worth doing after touching the RX path:
 

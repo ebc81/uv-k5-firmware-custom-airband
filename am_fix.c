@@ -42,7 +42,13 @@ typedef struct
 	int8_t   gain_dB;
 } __attribute__((packed)) t_gain_table;
 
-// REG_10 AGC gain table
+// BK4819 RX AGC gain table entry
+//
+// REG_10..REG_14 hold the AGC gain table (index max->min is 3, 2, 1, 0, -1) and all
+// five share the bitfield layout below. This module drives REG_13 specifically,
+// because BK4819_SetAGC() pins the AGC to fix mode with fix index 3 via
+// REG_7E <15> and <14:12>, which makes REG_13 the entry the front end actually
+// uses. See BK4819_InitAGC() in driver/bk4819.c for the stock values.
 //
 // <15:10> ???
 //
@@ -139,7 +145,7 @@ static const t_gain_table gain_table[] =
 	{0x035F,-14},   // 36 .. 3 2 3 7 ..   0dB -14dB  0dB   0dB .. -14dB
 	{0x037E,-12},   // 37 .. 3 3 3 6 ..   0dB  -9dB  0dB  -3dB .. -12dB
 	{0x037F,-9},    // 38 .. 3 3 3 7 ..   0dB  -9dB  0dB   0dB ..  -9dB
-	{0x038F,-6},    // 39 .. 3 4 3 7 ..   0dB - 6dB  0dB   0dB ..  -6dB
+	{0x039F,-6},    // 39 .. 3 4 3 7 ..   0dB - 6dB  0dB   0dB ..  -6dB
 	{0x03BF,-4},    // 40 .. 3 5 3 7 ..   0dB  -4dB  0dB   0dB ..  -4dB
 	{0x03DF,-2},    // 41 .. 3 6 3 7 ..   0dB - 2dB  0dB   0dB ..  -2dB
 	{0x03FF,0}      // 42 .. 3 7 3 7 ..   0dB   0dB  0dB   0dB ..   0dB
@@ -168,42 +174,60 @@ typedef union  {
 	static const int8_t mixer_dB[]     = { -8,  -6,  -3,   0};
 	static const int8_t pga_dB[]       = {-33, -27, -21, -15, -9, -6, -3, 0};
 
-	unsigned i;
+    // entry 0 is the stock QS setting and stays out of the sorted run, so the
+    // generated entries occupy 1 .. used-1, ascending by gain.
+    unsigned int used = 1;
+
     for (uint8_t lnaSIdx = 0; lnaSIdx < ARRAY_SIZE(lna_short_dB); lnaSIdx++) {
         for (uint8_t lnaIdx = 0; lnaIdx < ARRAY_SIZE(lna_dB); lnaIdx++) {
             for (uint8_t mixerIdx = 0; mixerIdx < ARRAY_SIZE(mixer_dB); mixerIdx++) {
                 for (uint8_t pgaIdx = 0; pgaIdx < ARRAY_SIZE(pga_dB); pgaIdx++) {
-                    int16_t db = lna_short_dB[lnaSIdx] + lna_dB[lnaIdx] + mixer_dB[mixerIdx] + pga_dB[pgaIdx];
-                    GainData gainData = {{
-                        pgaIdx,
-                        mixerIdx,
-                        lnaIdx,
-                        lnaSIdx,
-                    }};
+                    int8_t db = (int8_t)(lna_short_dB[lnaSIdx] + lna_dB[lnaIdx] + mixer_dB[mixerIdx] + pga_dB[pgaIdx]);
+                    // REG_13 only defines bits <9:0>. Initialising through the
+                    // struct member leaves the union's top 6 bits as unspecified
+                    // padding, and __raw is written straight into the register -
+                    // GCC fills those bits differently per target and -O level
+                    // (armhf -O0 hands back 0x15 there). Zero the word first.
+                    GainData gainData = {.__raw = 0};
+                    gainData.pgaIdx   = pgaIdx;
+                    gainData.mixerIdx = mixerIdx;
+                    gainData.lnaIdx   = lnaIdx;
+                    gainData.lnaSIdx  = lnaSIdx;
 
-                    for (i = 1; i < ARRAY_SIZE(gain_table); i++) {
-                        t_gain_table * gain = &gain_table[i];
-                        if (db == gain->gain_dB)
-                            break;
-                        if (db > gain->gain_dB)
-                            continue;
-                        if (db < gain->gain_dB) {
-                            if(gain->gain_dB)
-                                memmove(gain + 1, gain, 100 - i);
-                            gain->gain_dB = db;
-                            gain->reg_val = gainData.__raw;
+                    if (used >= ARRAY_SIZE(gain_table))
+                        continue;   // table full - can't happen, the sums only span -93..0
+
+                    // walk only the entries we have actually filled in. The old code
+                    // scanned the whole array and used gain_dB == 0 as its 'empty slot'
+                    // marker, which also swallowed the legitimate 0dB entry.
+                    unsigned int i;
+                    for (i = 1; i < used; i++) {
+                        if (db == gain_table[i].gain_dB)
+                            break;      // already have this gain, keep the first one
+                        if (db < gain_table[i].gain_dB) {
+                            // make room. memmove() counts BYTES, and t_gain_table is a
+                            // packed 3-byte struct - the original passed the element
+                            // count here, so it shifted a third of the data it meant to.
+                            memmove(&gain_table[i + 1], &gain_table[i],
+                                    (used - i) * sizeof(gain_table[0]));
+                            gain_table[i].gain_dB = db;
+                            gain_table[i].reg_val = gainData.__raw;
+                            used++;
                             break;
                         }
-                        gain->gain_dB = db;
-                        gain->reg_val = gainData.__raw;
-                        break;
+                    }
+
+                    if (i >= used) {    // ran off the end - this is the new maximum
+                        gain_table[used].gain_dB = db;
+                        gain_table[used].reg_val = gainData.__raw;
+                        used++;
                     }
                 }
             }
         }
     }
 
-    gain_table_size = i+1;
+    gain_table_size = (uint8_t)used;
 }
 #endif
 
@@ -253,8 +277,9 @@ static const uint8_t decay_ticks[] = {4, 8, 16};
 #endif
 
 unsigned int gain_table_index[2] = {0, 0};
-// used simply to detect a changed gain setting
-unsigned int gain_table_index_prev[2] = {0, 0};
+// REG_13 is one physical register shared by both VFOs, so this tracks what is
+// actually programmed into it right now - not what a given VFO last wrote.
+unsigned int gain_table_index_prev = 0;
 // holds the most recent RSSI reading (for the debug display)
 int16_t prev_rssi[2] = {0, 0};
 // to help reduce gain hunting, peak hold count down tick
@@ -299,6 +324,16 @@ static int16_t AM_fix_desired_rssi(void)
 // REG_78 works on post-gain RSSI, so without this every gain step would move the
 // squelch reference underneath the comparator and the squelch would chatter in
 // step with the AGC - which is exactly what makes weak AM signals drop out.
+//
+// Note how little headroom there is to shift into. With ENABLE_SQUELCH_MORE_SENSITIVE
+// (the Makefile default) radio.c halves the factory VHF open threshold, so the base we
+// are handed is around 25 units - about 12.5dB. Past roughly 13dB of gain reduction both
+// thresholds clamp at 0 and the RSSI criterion drops out of the squelch altogether.
+// What is left is the noise and glitch criteria, which radio.c deliberately keeps live
+// for AM (noise open ~97, under the 127 clamp). So this compensation is exact for the
+// first few table steps and degenerates into a noise/glitch squelch beyond that - which
+// is a reasonable squelch for AM, but it is not the same thing as holding the squelch
+// referenced to the antenna signal across the whole gain range.
 static void AM_fix_apply_squelch_shift(void)
 {
 	if (!squelch_base_valid)
@@ -360,14 +395,14 @@ void AM_fix_init(void)
 	}
 
 	for (int i = 0; i < 2; i++) {
-		gain_table_index[i]      = start_index;
-		gain_table_index_prev[i] = 0xFFFF;   // force the first register write
-		rssi_hist_pos[i]         = 0;
-		rssi_hist_len[i]         = 0;
-		decay_counter[i]         = 0;
-		hold_counter[i]          = 0;
-		prev_rssi[i]             = 0;
+		gain_table_index[i] = start_index;
+		rssi_hist_pos[i]    = 0;
+		rssi_hist_len[i]    = 0;
+		decay_counter[i]    = 0;
+		hold_counter[i]     = 0;
+		prev_rssi[i]        = 0;
 	}
+	gain_table_index_prev = 0xFFFF;   // force the first register write
 
 	currentGainDiff = 0;
 #if !LOOKUP_TABLE
@@ -531,10 +566,10 @@ void AM_fix_10ms(const unsigned vfo)
 	{	// apply the new settings to the front end registers
 		const unsigned int index = gain_table_index[vfo];
 
-		if (index != gain_table_index_prev[vfo])
+		if (index != gain_table_index_prev)
 		{
 			// remember the new table index
-			gain_table_index_prev[vfo] = index;
+			gain_table_index_prev = index;
 			currentGainDiff = gain_table[0].gain_dB - gain_table[index].gain_dB;
 			BK4819_WriteRegister(BK4819_REG_13, gain_table[index].reg_val);
 
@@ -581,12 +616,12 @@ void AM_fix_enable(bool on)
 	{	// force the gain and squelch offset to be reprogrammed on the next tick
 		for (int i = 0; i < 2; i++)
 		{
-			gain_table_index_prev[i] = 0xFFFF;
-			rssi_hist_len[i]         = 0;
-			rssi_hist_pos[i]         = 0;
-			decay_counter[i]         = 0;
-			hold_counter[i]          = AM_FIX_SETTLE_TICKS;
+			rssi_hist_len[i] = 0;
+			rssi_hist_pos[i] = 0;
+			decay_counter[i] = 0;
+			hold_counter[i]  = AM_FIX_SETTLE_TICKS;
 		}
+		gain_table_index_prev = 0xFFFF;
 	}
 	else
 	{	// hand the front end and the squelch back in a known-good state,
